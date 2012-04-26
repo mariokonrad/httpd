@@ -1,5 +1,6 @@
 CC=gcc
 CFLAGS=-Wall -ansi -pedantic -Wall -Wextra -O2
+#CFLAGS=-Wall -ansi -pedantic -Wall -Wextra -ggdb
 LDFLAGS=
 
 .PHONY: all index clean

@@ -1,10 +1,8 @@
 
-#define SOCKET
-
-#ifdef SOCKET
 #include <sys/socket.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <fcntl.h>
 
 #if defined(__CYGWIN__)
 #include <cygwin/in.h>
@@ -12,52 +10,35 @@
 #include <netinet/in.h>
 #endif
 
-#endif
-
 #include <stdio.h>
 #include <ctype.h>
 #include <string.h>
 
-#ifdef SOCKET
+#define UNUSED(arg)  ((void)arg)
+
 static int ssock;
 static struct sockaddr_in saddr;
 static int csock = -1;
 static struct sockaddr_in caddr;
 static socklen_t clen;
 static int crc = 1;
-#else
-static const char * buf = "GET /index.php?search=foobar&lang=en HTTP/1.1\r\nHost: foobar.com\r\nContent-Length: 10\r\n\r\nabc=def&ghi=jkl\r\n";
-static const char * p;
-#endif
 
 /* {{{ */
 static int client_connected(void)
 {
-#ifdef SOCKET
 	return csock >= 0;
-#else
-	return 1;
-#endif
 }
 
 static int client_available(void)
 {
-#ifdef SOCKET
 	return crc > 0;
-#else
-	return p <= buf + strlen(buf);
-#endif
 }
 
 static char client_read(void)
 {
-#ifdef SOCKET
 	char c = 0;
 	crc = read(csock, &c, sizeof(c));
 	return c;
-#else
-	return *p++;
-#endif
 }
 /* }}} */
 
@@ -72,6 +53,10 @@ struct request_t {
 	size_t nquery;
 	struct query_t query[8];
 	int content_length;
+};
+
+struct response_t {
+	char head[256];
 };
 
 static int str_append(char * s, size_t len, char c)
@@ -132,7 +117,7 @@ int parse(struct request_t * r)
 	int state = 0;
 	int next = 1;
 	int timeout = 10;
-	char c = 0;
+	int c = 0;
 	char s[128];
 	int c_len = -1;
 
@@ -310,35 +295,158 @@ static void print_req(int rc, struct request_t * r)
 	printf("\n");
 }
 
-static void server(void)
-{
-#ifdef SOCKET
-	static const char * RESPONSE = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nPragma: no-cache\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n<html><body>Welcome</body></html>\r\n";
-	static const char * BAD_REQUEST = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nPragma: no-cache\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n<html><body>Bad Request</body></html>\r\n";
+static void (*func_bad_request)(int, const struct request_t *) = NULL;
+static void (*func_request)(int, const struct request_t *) = NULL;
 
+static int server(void)
+{
 	struct request_t r;
 	int rc;
 
 	for (;;) {
 		csock = accept(ssock, (struct sockaddr *)&caddr, &clen);
-		if (csock < 0) return;
+		if (csock < 0) return -1;
 		rc = parse(&r);
 		print_req(rc, &r);
-		if (rc) {
-			rc = write(csock, BAD_REQUEST, strlen(BAD_REQUEST));
+		if (rc == 0) {
+			if (func_request) func_request(csock, &r);
 		} else {
-			rc = write(csock, RESPONSE, strlen(RESPONSE));
+			if (func_bad_request) func_bad_request(csock, &r);
 		}
 		shutdown(csock, SHUT_WR);
 		close(csock);
 		csock = -1;
 	}
-#endif
+}
+
+static void request_bad(int sock, struct request_t * req)
+{
+	static const char * RESPONSE =
+		"HTTP/1.1 400 Bad Request\r\n"
+		"Content-Type: text/html\r\n"
+		"Pragma: no-cache\r\n"
+		"Cache-Control: no-cache\r\n"
+		"Connection: close\r\n"
+		"\r\n"
+		"<html><body>Bad Request</body></html>\r\n";
+
+	UNUSED(req);
+
+	write(sock, RESPONSE, strlen(RESPONSE));
+}
+
+static void response_init(struct response_t * res)
+{
+	memset(res->head, 0, sizeof(res->head));
+}
+
+static int response_append_content_type(struct response_t * res, const char * mime)
+{
+	static const char * TEXT = "Content-Type: ";
+
+	if (strlen(res->head) > (sizeof(res->head) - strlen(TEXT) - strlen(mime) - 2)) return -1;
+	strcat(res->head, TEXT);
+	strcat(res->head, mime);
+	strcat(res->head, "\r\n");
+	return 0;
+}
+
+static int response_append_no_cache(struct response_t * res)
+{
+	static const char * TEXT =
+		"Pragma: no-cache\r\n"
+		"Cache-Control: no-cache\r\n";
+
+	if (strlen(res->head) > (sizeof(res->head) - strlen(TEXT))) return -1;
+	strcat(res->head, TEXT);
+	return 0;
+}
+
+static int response_append_connection_close(struct response_t * res)
+{
+	static const char * TEXT = "Connection: close\r\n";
+
+	if (strlen(res->head) > (sizeof(res->head) - strlen(TEXT))) return -1;
+	strcat(res->head, TEXT);
+	return 0;
+}
+
+static int response_append_header_start(struct response_t * res)
+{
+	static const char * TEXT = "HTTP/1.1 200 OK\r\n";
+
+	if (strlen(res->head) > (sizeof(res->head) - strlen(TEXT))) return -1;
+	strcat(res->head, TEXT);
+	return 0;
+}
+
+static int response_append_header_end(struct response_t * res)
+{
+	static const char * TEXT = "\r\n";
+
+	if (strlen(res->head) > (sizeof(res->head) - strlen(TEXT))) return -1;
+	strcat(res->head, TEXT);
+	return 0;
+}
+
+static int send_header_mime(int sock, const char * mime)
+{
+	int len;
+	struct response_t res;
+
+	response_init(&res);
+	response_append_header_start(&res);
+	response_append_content_type(&res, mime);
+	response_append_no_cache(&res);
+	response_append_connection_close(&res);
+	response_append_header_end(&res);
+
+	len = (int)strlen(res.head);
+	return write(sock, res.head, len) == len ? 0 : -1;
+}
+
+static void request_send_file(int sock, struct request_t * req, const char * filename)
+{
+	int fd;
+	int rc;
+	char buf[256];
+
+	fd = open(filename, O_RDONLY);
+	if (fd < 0) return;
+
+	if (send_header_mime(sock, "text/html") >= 0) {
+		for (;;) {
+			rc = read(fd, buf, sizeof(buf));
+			if (rc <= 0) break;
+			rc = write(sock, buf, rc);
+			if (rc < 0) break;
+		}
+	}
+	close(fd);
+}
+
+static void request_response(int sock, struct request_t * req)
+{
+	static const char * RESPONSE =
+		"HTTP/1.1 200 OK\r\n"
+		"Content-Type: text/html\r\n"
+		"Pragma: no-cache\r\n"
+		"Cache-Control: no-cache\r\n"
+		"Connection: close\r\n"
+		"\r\n"
+		"<html><body>Welcome</body></html>\r\n";
+
+	UNUSED(req);
+
+	if (strcmp(req->url, "/") == 0) {
+		request_send_file(sock, req, "index.html");
+	} else {
+		write(sock, RESPONSE, strlen(RESPONSE));
+	}
 }
 
 int main()
 {
-#ifdef SOCKET
 	ssock = socket(AF_INET, SOCK_STREAM, 0);
 	if (ssock < 0) {
 		perror("socket");
@@ -352,17 +460,15 @@ int main()
 		perror("bind");
 		return -1;
 	}
+	/* TODO: sockopt: reuse */
 	if (listen(ssock, 2)) {
 		perror("listen");
 		return -1;
 	}
-	server();
-#else
-	struct request_t r;
-	p = buf;
-	print_req(parse(&r), &r);
-#endif
 
-	return 0;
+	func_bad_request = request_bad;
+	func_request = request_response;
+
+	return server();
 }
 
