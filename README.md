@@ -9,7 +9,7 @@ LICENSE
 (BSD)
 
 ```
-Copyright (c) 2013, Mario Konrad
+Copyright (c) 2016, Mario Konrad
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
