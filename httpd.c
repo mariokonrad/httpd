@@ -109,7 +109,16 @@ static int append(char * s, size_t len, char c)
 	return str_append(s, len, c);
 }
 
-int parse(int client_sock, struct request_t * r)
+/**
+ * Parses received data from \c client_sock and sets corresponding
+ * fields of the specified request data structure.
+ *
+ * \param[in] client_sock Client socket to read data from.
+ * \param[out] r The request data structure to fill.
+ * \return \c 0 on success, the negative state number in which the
+ *   error ocurred.
+ */
+static int parse(int client_sock, struct request_t * r)
 {
 	int state = 0; /* state machine */
 	int read_next = 1; /* indicator to read data */
