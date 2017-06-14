@@ -44,8 +44,8 @@ struct server_t {
 	int sock;
 	struct sockaddr_in addr;
 
-	void (*func_bad_request)(int, const struct request_t *);
-	void (*func_request)(int, const struct request_t *);
+	int (*func_bad_request)(int, const struct request_t *);
+	int (*func_request)(int, const struct request_t *);
 };
 
 struct client_t {
@@ -112,31 +112,31 @@ static int append(char * s, size_t len, char c)
 int parse(int client_sock, struct request_t * r)
 {
 	int state = 0; /* state machine */
-	int next = 1; /* indicator to read data */
+	int read_next = 1; /* indicator to read data */
 	char c = 0;
-	char str[128];
-	int c_len = -1;
+	int content_length = -1;
 	int client_rc = 1;
+	char str[128];
 
 	request_clear(r);
 	clear(str, sizeof(str));
 	while (client_sock >= 0) {
 
 		/* read data */
-		if (next) {
-			if (client_rc <= 0 || c_len == 0)
+		if (read_next) {
+			if (client_rc <= 0 || content_length == 0)
 				return 0;
 			client_rc = read(client_sock, &c, sizeof(c));
-			if (c_len > 0)
-				--c_len;
-			next = 0;
+			if (content_length > 0)
+				--content_length;
+			read_next = 0;
 		}
 
 		/* execute state machine */
 		switch (state) {
 			case 0: /* kill leading spaces */
 				if (isspace(c)) {
-					next = 1;
+					read_next = 1;
 				} else {
 					state = 1;
 				}
@@ -147,12 +147,12 @@ int parse(int client_sock, struct request_t * r)
 				} else {
 					if (method_append(r, c))
 						return -state;
-					next = 1;
+					read_next = 1;
 				}
 				break;
 			case 2: /* kill spaces */
 				if (isspace(c)) {
-					next = 1;
+					read_next = 1;
 				} else {
 					state = 3;
 				}
@@ -161,12 +161,12 @@ int parse(int client_sock, struct request_t * r)
 				if (isspace(c)) {
 					state = 5;
 				} else if (c == '?') {
-					next = 1;
+					read_next = 1;
 					state = 4;
 				} else {
 					if (url_append(r, c))
 						return -state;
-					next = 1;
+					read_next = 1;
 				}
 				break;
 			case 4: /* queries */
@@ -177,16 +177,16 @@ int parse(int client_sock, struct request_t * r)
 				} else if (c == '&') {
 					if (query_next(r))
 						return -state;
-					next = 1;
+					read_next = 1;
 				} else {
 					if (query_append(r, c))
 						return -state;
-					next = 1;
+					read_next = 1;
 				}
 				break;
 			case 5: /* kill spaces */
 				if (isspace(c)) {
-					next = 1;
+					read_next = 1;
 				} else {
 					state = 6;
 				}
@@ -197,12 +197,12 @@ int parse(int client_sock, struct request_t * r)
 				} else {
 					if (protocol_append(r, c))
 						return -state;
-					next = 1;
+					read_next = 1;
 				}
 				break;
 			case 7: /* kill spaces */
 				if (isspace(c)) {
-					next = 1;
+					read_next = 1;
 				} else {
 					clear(str, sizeof(str));
 					state = 8;
@@ -212,19 +212,19 @@ int parse(int client_sock, struct request_t * r)
 				if (c == ':') {
 					/* TODO: key complete */
 					if (strcmp(str, "Content-Length") == 0)
-						c_len = -2;
+						content_length = -2;
 					clear(str, sizeof(str));
 					state = 9;
-					next = 1;
+					read_next = 1;
 				} else {
 					if (append(str, sizeof(str)-1, c))
 						return -state;
-					next = 1;
+					read_next = 1;
 				}
 				break;
 			case 9: /* kill spaces */
 				if (isspace(c)) {
-					next = 1;
+					read_next = 1;
 				} else {
 					clear(str, sizeof(str));
 					state = 10;
@@ -233,32 +233,32 @@ int parse(int client_sock, struct request_t * r)
 			case 10: /* header line value */
 				if (c == '\r') {
 					/* TODO: value complete, store content length */
-					if (c_len != -2)
-						c_len = strtol(str, 0, 0);
+					if (content_length != -2)
+						content_length = strtol(str, 0, 0);
 					clear(str, sizeof(str));
 					state = 11;
-					next = 1;
+					read_next = 1;
 				} else {
 					if (append(str, sizeof(str)-1, c))
 						return -state;
-					next = 1;
+					read_next = 1;
 				}
 				break;
 			case 11:
 				if (c == '\n') {
-					next = 1;
+					read_next = 1;
 				} else if (c == '\r') {
 					state = 12;
-					next = 1;
+					read_next = 1;
 				} else {
 					state = 8;
 				}
 				break;
 			case 12: /* end of header */
 				if (c == '\n') {
-					if (c_len > 0) {
+					if (content_length > 0) {
 						state = 13;
-						next = 1;
+						read_next = 1;
 					} else {
 						return 0; /* end of header, no content => end of request */
 					}
@@ -271,17 +271,17 @@ int parse(int client_sock, struct request_t * r)
 				if (c == '&') {
 					if (query_next(r))
 						return -state;
-					next = 1;
+					read_next = 1;
 				} else if (c == '\r') {
 					if (query_next(r))
 						return -state;
-					next = 1;
+					read_next = 1;
 				} else if (c == '\n') {
-					next = 1;
+					read_next = 1;
 				} else {
 					if (query_append(r, c))
 						return -state;
-					next = 1;
+					read_next = 1;
 				}
 				break;
 		}
@@ -331,7 +331,7 @@ static int run_server(struct server_t * server)
 	}
 }
 
-static void request_bad(int sock, const struct request_t * req)
+static int request_bad(int sock, const struct request_t * req)
 {
 	static const char * RESPONSE =
 		"HTTP/1.1 400 Bad Request\r\n"
@@ -342,9 +342,12 @@ static void request_bad(int sock, const struct request_t * req)
 		"\r\n"
 		"<html><body>Bad Request</body></html>\r\n";
 
+	int length = 0;
+
 	UNUSED(req);
 
-	write(sock, RESPONSE, strlen(RESPONSE));
+	length = strlen(RESPONSE);
+	return write(sock, RESPONSE, length) == length ? 0 : -1;
 }
 
 static void response_init(struct response_t * res)
@@ -415,7 +418,7 @@ static int send_header_mime(int sock, const char * mime)
 	return write(sock, res.head, len) == len ? 0 : -1;
 }
 
-static void request_send_file(int sock, const struct request_t * req, const char * filename)
+static int request_send_file(int sock, const struct request_t * req, const char * filename)
 {
 	int fd;
 	int rc;
@@ -425,7 +428,7 @@ static void request_send_file(int sock, const struct request_t * req, const char
 
 	fd = open(filename, O_RDONLY);
 	if (fd < 0)
-		return;
+		return -1;
 
 	if (send_header_mime(sock, "text/html") >= 0) {
 		for (;;) {
@@ -436,9 +439,10 @@ static void request_send_file(int sock, const struct request_t * req, const char
 		}
 	}
 	close(fd);
+	return 0;
 }
 
-static void request_response(int sock, const struct request_t * req)
+static int request_response(int sock, const struct request_t * req)
 {
 	static const char * RESPONSE =
 		"HTTP/1.1 200 OK\r\n"
@@ -449,12 +453,15 @@ static void request_response(int sock, const struct request_t * req)
 		"\r\n"
 		"<html><body>Welcome</body></html>\r\n";
 
+	int length = 0;
+
 	UNUSED(req);
 
 	if (strcmp(req->url, "/") == 0) {
-		request_send_file(sock, req, "index.html");
+		return request_send_file(sock, req, "index.html");
 	} else {
-		write(sock, RESPONSE, strlen(RESPONSE));
+		length = strlen(RESPONSE);
+		return (write(sock, RESPONSE, length) == length) ? 0 : -1;
 	}
 }
 
