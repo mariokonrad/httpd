@@ -8,13 +8,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <fcntl.h>
-
-#if defined(__CYGWIN__)
-#include <cygwin/in.h>
-#elif defined(__linux__)
 #include <netinet/in.h>
-#endif
-
 #include <stdio.h>
 #include <ctype.h>
 #include <string.h>
@@ -25,10 +19,15 @@ struct query_t {
 	char val[24];
 };
 
+struct header_property_t {
+	char key[32];
+	char value[128];
+};
+
 struct request_t {
 	char method[8];
 	char protocol[12];
-	char url[32];
+	char url[128];
 
 	/* query data, very constrained regarding memory resources */
 	size_t nquery; /* number of queries */
@@ -104,6 +103,12 @@ static void clear(char * s, size_t len)
 	memset(s, 0, len);
 }
 
+static void clear_header_property(struct header_property_t * prop)
+{
+	clear(prop->key, sizeof(prop->key));
+	clear(prop->value, sizeof(prop->value));
+}
+
 static int append(char * s, size_t len, char c)
 {
 	return str_append(s, len, c);
@@ -122,22 +127,35 @@ static int parse(int client_sock, struct request_t * r)
 {
 	int state = 0; /* state machine */
 	int read_next = 1; /* indicator to read data */
-	char c = 0;
-	int content_length = -1;
-	int client_rc = 1;
-	char str[128];
+	char c = 0; /* current character */
+	char buffer[16]; /* receive buffer */
+	int buffer_index = sizeof(buffer); /* index within the buffer */
+	int content_length = -1; /* used only in POST requests */
+	struct header_property_t prop; /* temporary space to hold header key/value properties*/
 
 	request_clear(r);
-	clear(str, sizeof(str));
+	clear_header_property(&prop);
 	while (client_sock >= 0) {
 
 		/* read data */
 		if (read_next) {
-			if (client_rc <= 0 || content_length == 0)
-				return 0;
-			client_rc = read(client_sock, &c, sizeof(c));
-			if (content_length > 0)
-				--content_length;
+
+			/* read new data, buffers at a time */
+			if (buffer_index >= (int)sizeof(buffer)) {
+				int rc;
+
+				memset(buffer, 0, sizeof(buffer));
+				rc = read(client_sock, buffer, sizeof(buffer));
+				if (rc < 0)
+					return -99; /* read error */
+				if (rc == 0)
+					return 0; /* no data read */
+				buffer_index = 0;
+			}
+			c = buffer[buffer_index];
+			++buffer_index;
+
+			/* state management */
 			read_next = 0;
 		}
 
@@ -213,20 +231,16 @@ static int parse(int client_sock, struct request_t * r)
 				if (isspace(c)) {
 					read_next = 1;
 				} else {
-					clear(str, sizeof(str));
+					clear_header_property(&prop);
 					state = 8;
 				}
 				break;
 			case 8: /* header line key */
 				if (c == ':') {
-					/* TODO: key complete */
-					if (strcmp(str, "Content-Length") == 0)
-						content_length = -2;
-					clear(str, sizeof(str));
 					state = 9;
 					read_next = 1;
 				} else {
-					if (append(str, sizeof(str)-1, c))
+					if (append(prop.key, sizeof(prop.key)-1, c))
 						return -state;
 					read_next = 1;
 				}
@@ -235,20 +249,18 @@ static int parse(int client_sock, struct request_t * r)
 				if (isspace(c)) {
 					read_next = 1;
 				} else {
-					clear(str, sizeof(str));
 					state = 10;
 				}
 				break;
 			case 10: /* header line value */
 				if (c == '\r') {
-					/* TODO: value complete, store content length */
-					if (content_length != -2)
-						content_length = strtol(str, 0, 0);
-					clear(str, sizeof(str));
+					if (strcmp("Content-Length", prop.key) == 0)
+						content_length = strtol(prop.value, 0, 0);
+					clear_header_property(&prop);
 					state = 11;
 					read_next = 1;
 				} else {
-					if (append(str, sizeof(str)-1, c))
+					if (append(prop.value, sizeof(prop.value)-1, c))
 						return -state;
 					read_next = 1;
 				}
@@ -276,7 +288,6 @@ static int parse(int client_sock, struct request_t * r)
 				}
 				break;
 			case 13: /* content (POST queries) */
-				/* TODO: read queries */
 				if (c == '&') {
 					if (query_next(r))
 						return -state;
@@ -287,6 +298,10 @@ static int parse(int client_sock, struct request_t * r)
 					read_next = 1;
 				} else if (c == '\n') {
 					read_next = 1;
+				} else if (c == '\0') {
+					if (query_next(r))
+						return -state;
+					return 0; /* end of content */
 				} else {
 					if (query_append(r, c))
 						return -state;
@@ -460,7 +475,7 @@ static int request_response(int sock, const struct request_t * req)
 		"Cache-Control: no-cache\r\n"
 		"Connection: close\r\n"
 		"\r\n"
-		"<html><body>Welcome</body></html>\r\n";
+		"<html><body>Welcome (default response)</body></html>\r\n";
 
 	int length = 0;
 
@@ -474,12 +489,14 @@ static int request_response(int sock, const struct request_t * req)
 	}
 }
 
+
 int main()
 {
-	struct server_t server;
+	static struct server_t server;
 	const int reuse = 1;
 
 	memset(&server, 0, sizeof(server));
+	server.sock = -1;
 
 	server.sock = socket(AF_INET, SOCK_STREAM, 0);
 	if (server.sock < 0) {
